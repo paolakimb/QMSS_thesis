@@ -1,2 +1,2 @@
 # QMSS_thesis
-Data processing/ analysis to complete the QMSS thesis
+Code used for data processing & analysis to complete the QMSS thesis
