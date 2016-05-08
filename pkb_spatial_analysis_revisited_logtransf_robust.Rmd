@@ -1,0 +1,564 @@
+---
+title: "Spatial Analysis- methodology revisited 2"
+author: "Paola Kim-Blanco"
+date: "April 23, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(fmsb)
+library(Rcmdr)
+library(maptools)
+library(rgdal)
+library(spdep)
+library(ctv)
+library(knitr)
+library(rmarkdown)
+library(lmtest)
+library(openxlsx)
+library(MASS)
+library(foreign)
+library(fBasics)
+library(robust)
+library(spgwr)
+library(aod)
+
+```
+
+#Methodology
+
+1- Data transformations, preliminary
+2- VIF test for all variables
+3- Descriptives of relevant variables (from previous runs)
+4- OLS + conduct Breusch -Pagan test for heteroskedasticity
+5- Look at residuals, run outlier analysis.
+6- OLS without outliers + BP test again
+7- OLS robust + BP test again
+8- Moran's I on weighted residuals
+9- Lagrange tests to select spatial model
+10- Spatial model
+11- Moran's I on residuals for sp model--is it the correct model?
+
+
+###1- Data transformations:
+```{r }
+
+x <- readOGR(dsn = "/Volumes/G-DRIVE mobile/Thesis/_2Data/gis/master_db", layer = "master_db7", verbose = FALSE)
+x@data$ALLHAZARDS <- x@data$EQK + x@data$FLOOD + x@data$FROST + x@data$HEATWAVE + x@data$RAIN + x@data$HURR
+
+#log transformations
+#even though ln(0) = Inf, I am transforming to zero because 0 income or 0 events is 0.
+attach(x@data)
+x@data$ln_INRATE <- ifelse(INRATE == 0, 0, log(INRATE))
+x@data$ln_OUTRATE <- ifelse(OUTRATE == 0, 0, log(OUTRATE))
+x@data$ln_INCOME <- ifelse(INCOME == 0, 0, log(INCOME))
+x@data$ln_VDEATH <- ifelse(VDEATH == 0, 0, log(VDEATH))
+x@data$ln_FLOOD <- ifelse(FLOOD == 0, 0, log(FLOOD))
+x@data$ln_FROST <- ifelse(FROST == 0, 0, log(FROST))
+x@data$ln_HURR <- ifelse(HURR == 0, 0, log(HURR))
+x@data$ln_RAIN <- ifelse(RAIN == 0, 0, log(RAIN))
+x@data$ln_EQK <- ifelse(EQK == 0, 0, log(EQK))
+x@data$ln_ALLHAZARDS <- ifelse(ALLHAZARDS == 0, 0, log(ALLHAZARDS))
+x@data$ln_ECONEST <- ifelse(ECONEST == 0, 0, log(ECONEST))
+x@data$ln_EXPSCHOOL <- ifelse(EXPSCHOOLI == 0, 0, log(EXPSCHOOLI))
+x@data$ln_PINV <- ifelse(PINV == 0, 0, log(PINV))
+x@data$ln_PURBAN <- ifelse(PURBAN == 0, 0, log(PURBAN))
+detach(x@data)
+```
+
+
+###2- Run VIF
+```{r}
+#run vif function-- got it from https://beckmw.wordpress.com/2013/02/05/collinearity-and-stepwise-vif-selection/
+
+vif_func<-function(in_frame,thresh=10,trace=T,...){
+    
+    require(fmsb)
+    
+    if(class(in_frame) != 'data.frame') in_frame<-data.frame(in_frame)
+    
+    #get initial vif value for all comparisons of variables
+    vif_init<-NULL
+    var_names <- names(in_frame)
+    for(val in var_names){
+        regressors <- var_names[-which(var_names == val)]
+        form <- paste(regressors, collapse = '+')
+        form_in <- formula(paste(val, '~', form))
+        vif_init<-rbind(vif_init, c(val, VIF(lm(form_in, data = in_frame, ...))))
+    }
+    vif_max<-max(as.numeric(vif_init[,2]))
+    
+    if(vif_max < thresh){
+        if(trace==T){ #print output of each iteration
+            prmatrix(vif_init,collab=c('var','vif'),rowlab=rep('',nrow(vif_init)),quote=F)
+            cat('\n')
+            cat(paste('All variables have VIF < ', thresh,', max VIF ',round(vif_max,2), sep=''),'\n\n')
+        }
+        return(var_names)
+    }
+    else{
+        
+        in_dat<-in_frame
+        
+        #backwards selection of explanatory variables, stops when all VIF values are below 'thresh'
+        while(vif_max >= thresh){
+            
+            vif_vals<-NULL
+            var_names <- names(in_dat)
+            
+            for(val in var_names){
+                regressors <- var_names[-which(var_names == val)]
+                form <- paste(regressors, collapse = '+')
+                form_in <- formula(paste(val, '~', form))
+                vif_add<-VIF(lm(form_in, data = in_dat, ...))
+                vif_vals<-rbind(vif_vals,c(val,vif_add))
+            }
+            max_row<-which(vif_vals[,2] == max(as.numeric(vif_vals[,2])))[1]
+            
+            vif_max<-as.numeric(vif_vals[max_row,2])
+            
+            if(vif_max<thresh) break
+            
+            if(trace==T){ #print output of each iteration
+                prmatrix(vif_vals,collab=c('var','vif'),rowlab=rep('',nrow(vif_vals)),quote=F)
+                cat('\n')
+                cat('removed: ',vif_vals[max_row,1],vif_max,'\n\n')
+                flush.console()
+            }
+            
+            in_dat<-in_dat[,!names(in_dat) %in% vif_vals[max_row,1]]
+            
+        }
+        
+        return(names(in_dat))
+        
+    }
+    
+}
+
+#all data
+# took out heatwave because it was causing problems
+y1 <- x@data[, c(32, 34:47, 18:22)]
+vif_func(in_frame = y1, thresh = 5, trace = FALSE)
+
+#selected data: natural disasters separately
+y2 <- x@data[, c(32, 34:47)]
+vif_func(in_frame = y2, thresh = 5, trace = F)
+
+#selected data: total natural disasters
+y3 <- x@data[, c(32, 34:37, 43:47)]
+vif_func(in_frame = y3, thresh = 5, trace = F)
+
+#selected data: % localities with reported damages, by type of disaster
+y4 <- x@data[, c(32, 34:37, 44:47,18:22)]
+vif_func(in_frame = y4, thresh = 5, trace = F)
+
+
+```
+
+
+###3- Descriptives of relevant variables (from previous runs)
+```{r}
+attach(x@data)
+hist(ln_INRATE)
+hist(ln_OUTRATE)
+hist(ln_INCOME)
+hist(INCOME)
+hist(ln_EXPSCHOOL)
+hist(EXPSCHOOLI)
+hist(VDEATH)
+hist(ln_VDEATH)
+hist(ln_PURBAN)
+hist(ln_PINV)
+hist(PINV)
+hist(ECONEST)
+hist(ln_ECONEST)
+
+hist(ln_FLOOD)
+hist(ln_FROST)
+hist(ln_EQK)
+hist(ln_HURR)
+hist(ln_RAIN)
+hist(ln_ALLHAZARDS)
+
+hist(FLOOD)
+hist(FROST)
+hist(EQK)
+hist(HURR)
+hist(RAIN)
+hist(ALLHAZARDS)
+
+hist(PFROST)
+hist(PDROUGHT)
+hist(PEQK)
+hist(PHURR)
+hist(PFLOOD)
+
+```
+
+
+
+
+###4- OLS + conduct Breusch -Pagan test for heteroskedasticity
+
+```{r}
+#ln_INRATE
+#ln_OUTRATE
+#INCOME
+#EXPSCHOOLI
+#ln_VDEATH
+#ln_PURBAN
+#ln_PINV
+#ln_ECONEST
+
+#In-rate
+
+###All hazards, por separado
+summary(in1 <- stepwise(lm(ln_INRATE ~ RURDUMMY + INCOME + ln_VDEATH + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_PURBAN + ln_FLOOD + ln_FROST + ln_HURR + ln_RAIN + ln_EQK , data =  x)))
+bptest(in1) #variables checked against multicolinearity/ yes, heteroskedasticity, indiv hazards not significant
+
+summary(in2 <- lm(ln_INRATE ~ INCOME + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_FLOOD + ln_FROST + ln_HURR + ln_RAIN + ln_EQK , data =  x))
+bptest(in2) #yes, heteroskedasticity, only rain significant
+
+
+###All hazards, sum
+summary(in3 <- stepwise(lm(ln_INRATE ~ RURDUMMY + INCOME + ln_VDEATH + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_ALLHAZARDS , data =  x)))
+bptest(in3) #variables checked against multicolinearity/ yes, heteroskedasticity, all hazards not significant
+
+summary(in4 <- lm(ln_INRATE ~ INCOME + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_ALLHAZARDS , data =  x))
+bptest(in4) #yes, heteroskedasticity, all hazards not significant
+
+
+#Percent rural villages with damages
+summary(in5 <- stepwise(lm(ln_INRATE ~ RURDUMMY + INCOME + ln_VDEATH + ln_ECONEST + ln_PINV + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  x)))
+bptest(in5) #variables checked against multicolinearity/ yes, heteroskedasticity, all % village damages not significant
+
+summary(in6 <- lm(ln_INRATE ~ INCOME + ln_ECONEST + ln_PINV + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  x))
+bptest(in6) #yes, heteroskedasticity, all % village damages not significant
+
+```
+
+```{r}
+
+#Out-rate
+###All hazards, por separado
+summary(out1 <- stepwise(lm(ln_OUTRATE ~ RURDUMMY + INCOME + ln_VDEATH + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_PURBAN + ln_FLOOD + ln_FROST + ln_HURR + ln_RAIN + ln_EQK , data =  x)))
+bptest(out1) #variables checked agains multicolinearity; heteroskedastic; only frost is significant
+
+summary(out2 <- lm(ln_OUTRATE ~ INCOME + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_FLOOD + ln_FROST + ln_HURR + ln_RAIN + ln_EQK , data =  x))
+bptest(out2) #heteroskedastic; rain,hurricanes and frost significant
+
+#All hazards, sum
+summary(out3 <- stepwise(lm(ln_OUTRATE ~ RURDUMMY + INCOME + ln_VDEATH + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_ALLHAZARDS , data =  x)))
+bptest(out3) #variables checked against multicolinearity/ yes, heteroskedasticity, all hazards significant
+
+summary(out4 <- lm(ln_OUTRATE ~ INCOME + ln_ECONEST + ln_PINV + EXPSCHOOLI + ln_ALLHAZARDS , data =  x))
+bptest(out4) #yes, heteroskedasticity, all hazards significant
+
+
+#Percent rural villages with damages
+summary(out5 <- stepwise(lm(ln_OUTRATE ~ RURDUMMY + INCOME + ln_VDEATH + ln_ECONEST + ln_PINV + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  x)))
+bptest(out5) #variables checked against multicolinearity/ yes, heteroskedasticity, %drought, %frost, %flood, %hurr are significant
+
+summary(out6 <- lm(ln_OUTRATE ~ INCOME + ln_ECONEST + ln_PINV + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  x))
+bptest(out6) #yes, heteroskedasticity/ everything is significant except % earthquakes
+```
+
+###5- Look at residuals, adjust models
+
+```{r}
+residualPlots(in2) #residual plots
+avPlots(in2, id.n=2, id.cex=0.7) #influential observations
+qqPlot(in2, id.n=3)
+outlierTest(in2)
+influenceIndexPlot(in2, id.n = 3) 
+
+residualPlots(in4) #residual plots
+avPlots(in4, id.n=2, id.cex=0.7) #influential observations
+qqPlot(in4, id.n=3)
+outlierTest(in4)
+influenceIndexPlot(in4, id.n = 3) 
+#from looking at added-variable plots, took out ln_PINV, and run again
+
+summary(in4 <- lm(ln_INRATE ~ INCOME + ln_ECONEST + EXPSCHOOLI + ln_ALLHAZARDS , data =  x))
+bptest(in4) #yes, heteroskedasticity, all hazards not significant
+
+residualPlots(in4) #residual plots
+avPlots(in4, id.n=2, id.cex=0.7) #influential observations
+qqPlot(in4, id.n=3)
+outlierTest(in4)
+influenceIndexPlot(in4, id.n = 3) 
+
+residualPlots(in6) #residual plots
+avPlots(in6, id.n=2, id.cex=0.7) #influential observations
+qqPlot(in6, id.n=3)
+outlierTest(in6)
+influenceIndexPlot(in6, id.n = 3) 
+
+#from residual plot, take out ln_PINV and use ln_INCOME
+summary(in6 <- lm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  x))
+bptest(in6)
+
+residualPlots(in6) #residual plots
+avPlots(in6, id.n=2, id.cex=0.7) #influential observations
+qqPlot(in6, id.n=3)
+outlierTest(in6)
+influenceIndexPlot(in6, id.n = 3)
+
+
+###out
+
+residualPlots(out2)
+avPlots(out2, id.n=2, id.cex=0.7) #influential observations
+qqPlot(out2, id.n=3)
+outlierTest(out2)
+influenceIndexPlot(out2, id.n = 3)
+
+#use ln_INCOME, ln_PINV, take out ln_HURR, ln_FLOOD, ln_EQK
+summary(out2 <- lm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_FROST + ln_RAIN , data =  x))
+bptest(out2)
+# lots of outliers, same one (918) as in
+
+residualPlots(out4)
+avPlots(out4, id.n=2, id.cex=0.7) #influential observations
+qqPlot(out4, id.n=3)
+outlierTest(out4)
+influenceIndexPlot(out4, id.n = 3)
+#take out ln_PINV, use ln_INCOME
+
+summary(out4 <- lm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_ALLHAZARDS , data =  x))
+bptest(out4)
+#lost of outliers
+
+## correcting for income and ln_PINV
+summary(out6 <- lm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST  + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  x))
+bptest(out6)
+
+residualPlots(out6)
+avPlots(out6, id.n=2, id.cex=0.7) #influential observations
+qqPlot(out6, id.n=3)
+outlierTest(out6)
+influenceIndexPlot(out6, id.n = 3)
+
+```
+
+###6- Remove outliers
+
+```{r}
+
+outlierTest(in2)
+outlierTest(in4)
+outlierTest(in6)
+outlierTest(out2)
+outlierTest(out4)
+outlierTest(out6)
+
+outliers <- data.frame(mun_id = c("07113", "20319", "07056", "19041", "23010", "17007", "07022", "07118","20053", "20233", "15012", "20552"))
+
+y <- subset(x, !mun_id %in% outliers$mun_id)
+```
+
+###7- OLS with no outliers
+```{r}
+summary(in2 <- lm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_FLOOD + ln_FROST + ln_HURR + ln_RAIN + ln_EQK , data =  y))
+bptest(in2)
+
+summary(in4 <- lm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_ALLHAZARDS , data =  y))
+bptest(in4)
+
+
+
+
+summary(out2 <- lm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_FROST + ln_RAIN , data =  y))
+bptest(out2)
+
+summary(out4 <- lm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_ALLHAZARDS , data =  y))
+bptest(out4)
+
+
+#all models are still heteroskedastic
+
+##models #in6 and out6 need to have a separate run because they only pertain rural areas---
+w <- y[y@data$RURDUMMY == 1,]
+
+summary(in6 <- lm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  w))
+bptest(in6)
+logLik(in6)
+
+summary(out6 <- lm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST  + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  w))
+bptest(out6)
+logLik(out6)
+
+
+```
+
+###8- Run ronust OLS
+
+```{r}
+summary(in2r <- rlm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_FLOOD + ln_FROST + ln_HURR + ln_RAIN + ln_EQK , data =  y))
+bptest(in2r)
+
+summary(in4r <- rlm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_ALLHAZARDS , data =  y))
+bptest(in4r)
+
+summary(in6r <- rlm(ln_INRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  y))
+bptest(in6r)
+
+summary(out2r <- rlm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_FROST + ln_RAIN , data =  y))
+bptest(out2r)
+
+summary(out4r <- rlm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST + EXPSCHOOLI + ln_ALLHAZARDS , data =  y))
+bptest(out4r)
+
+summary(out6r <- rlm(ln_OUTRATE ~ ln_INCOME + ln_ECONEST  + EXPSCHOOLI + PDROUGHT + PFROST + PFLOOD + PEQK + PHURR , data =  y))
+bptest(out6r)
+
+```
+
+BP tests are still significant in all cases, therefore models are still heteroskedastic. This is indicative of
+patterns in the error which can be modelled with spatial models. Will use OLS for spatial modeling
+
+###9- Moran's I on robust or linear?
+
+```{r}
+queen1 <- poly2nb(y)
+queen_w <- nb2listw(queen1, style = "W", zero.policy = TRUE)
+queen1rural <- poly2nb(w)
+queen_wrural <- nb2listw(queen1rural, style = "W", zero.policy = TRUE)
+
+y@data$in2_res <- in2r$residuals
+moran.test(y@data$in2_res, queen_w, randomisation = TRUE, alternative = "two.sided")
+y@data$in4_res <- in4$residuals
+moran.test(y@data$in4_res, queen_w, randomisation = TRUE, alternative = "two.sided")
+w@data$in6_res <- in6$residuals
+moran.test(w@data$in6_res, queen_wrural, randomisation = TRUE, alternative = "two.sided")
+
+y@data$out2_res <- out2$residuals
+moran.test(y@data$out2_res, queen_w, randomisation = TRUE, alternative = "two.sided")
+y@data$out4_res <- out4$residuals
+moran.test(y@data$out4_res, queen_w, randomisation = TRUE, alternative = "two.sided")
+w@data$out6_res <- out6$residuals
+moran.test(w@data$out6_res, queen_wrural, randomisation = TRUE, alternative = "two.sided")
+
+AIC(in2, in4, in6, out2, out4, out6)
+rmse <- function(error)
+{
+    sqrt(mean(error^2))
+}
+rmse(residuals.lm(in2))
+rmse(residuals.lm(in4))
+rmse(residuals.lm(in6))
+rmse(residuals.lm(out2))
+rmse(residuals.lm(out4))
+rmse(residuals.lm(out6))
+
+
+```
+Very similar results with rmse
+Models in4 and out4 have the smallest AIC
+
+###10- Lagrange tests to select spatial model
+```{r}
+lm.LMtests(in2, queen_w, test = "all") #spatial error
+lm.LMtests(in4, queen_w, test = "all") #spatial error
+#lm.LMtests(in6, queen_w, test = "all") #spatial error
+lm.LMtests(out2, queen_w, test = "all") #spatial error
+lm.LMtests(out4, queen_w, test = "all") #spatial lag
+#lm.LMtests(out6, queen_w, test = "all") #spatial lag
+
+```
+
+
+###10- Spatial model
+
+```{r}
+summary(in2sp <- errorsarlm(in2, data = y, queen_w))
+bptest.sarlm(in2sp)
+
+summary(in4sp <- errorsarlm(in4, data = y, queen_w ))
+bptest.sarlm(in4sp)
+
+#summary(in6sp <- errorsarlm(in6, data = y, queen_w))
+#bptest.sarlm(in6sp)
+
+summary(out2sp <- errorsarlm(out2, data = y, queen_w))
+bptest.sarlm(out2sp)
+
+summary(out4sp <- lagsarlm(out4, data = y, queen_w))
+bptest.sarlm(out4sp)
+
+#summary(out6sp <- lagsarlm(out6, data = y, queen_w))
+#bptest.sarlm(out6sp)
+
+#writeOGR(y, dsn = "/Volumes/G-DRIVE mobile/Thesis/_2Data/gis/master_db", #layer = "master_db8", driver = "ESRI Shapefile")
+
+
+```
+
+
+###11- Moran's I on residuals for sp model
+
+```{r}
+
+moran.test(in2sp$residuals, queen_w, randomisation = TRUE, alternative = "two.sided")
+moran.test(in4sp$residuals, queen_w, randomisation = TRUE, alternative = "two.sided")
+moran.test(in6sp$residuals, queen_w, randomisation = TRUE, alternative = "two.sided")
+moran.test(out2sp$residuals, queen_w, randomisation = TRUE, alternative = "two.sided")
+moran.test(out4sp$residuals, queen_w, randomisation = TRUE, alternative = "two.sided")
+moran.test(out6sp$residuals, queen_w, randomisation = TRUE, alternative = "two.sided")
+
+
+```
+
+###12- GWR
+
+```{r}
+bw_in2 <- gwr.sel(ln_INRATE ~ ln_INCOME + EXPSCHOOLI + ln_ECONEST + ln_ALLHAZARDS, data = y, adapt = TRUE) 
+gwr_in2 <- gwr(ln_INRATE ~ ln_INCOME + EXPSCHOOLI + ln_ECONEST + ln_ALLHAZARDS, data = y, adapt = bw_in2, hatmatrix = TRUE, predict = TRUE, se.fit = TRUE)
+gwr_in2$results$rss
+gwr_in2$results$AICh
+moran.test(gwr_in2$SDF$gwr.e, queen_w)
+
+
+bw_in4 <- gwr.sel(in4, data = y, adapt = TRUE)
+gwr_in4 <- gwr(in4, data = y, adapt = bw_in4, hatmatrix = TRUE, predict = TRUE, se.fit = TRUE)
+gwr_in4$results$rss
+gwr_in4$results$AICh
+moran.test(gwr_in4$SDF$gwr.e, queen_w)
+
+
+bw_out2 <- gwr.sel(out2, data = y, adapt = TRUE) 
+gwr_out2 <- gwr(out2, data = y, adapt = bw_out2, hatmatrix = TRUE, predict = TRUE, se.fit = TRUE)
+gwr_out2$results$rss
+gwr_out2$results$AICh
+moran.test(gwr_out2$SDF$gwr.e, queen_w)
+
+bw_out4 <- gwr.sel(out4, data = y, adapt = TRUE) 
+gwr_out4 <- gwr(out4, data = y, adapt = bw_out4, hatmatrix = TRUE, predict = TRUE, se.fit = TRUE)
+gwr_out4$results$rss
+gwr_out4$results$AICh
+moran.test(gwr_out4$SDF$gwr.e, queen_w)
+
+
+```
+
+### Residuals
+```{r}
+
+rmse(residuals.sarlm(in4sp))
+rmse(residuals.sarlm(out4sp))
+```
+
+
+### Ploting queen1
+```{r}
+
+coords <- coordinates(y)
+plot(y)
+plot(queen_w, coords, add = TRUE)
+
+
+
+
+```
+
